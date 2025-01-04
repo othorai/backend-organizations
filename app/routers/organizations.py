@@ -288,20 +288,59 @@ def delete_organization(
         if not org:
             raise HTTPException(status_code=404, detail="Organization not found")
 
-        # Delete related records in correct order
-        # 1. Delete articles
-        db.execute(
-            text("DELETE FROM articles WHERE organization_id = :org_id"),
-            {"org_id": org_id}
-        )
+        # Use raw SQL to check and delete related data
+        try:
+            # 1. Check and delete from data_source_connections first
+            db.execute(
+                text("""
+                    DO $$ 
+                    BEGIN
+                        -- Delete metrics first
+                        DELETE FROM metric_definitions 
+                        WHERE connection_id IN (
+                            SELECT id FROM data_source_connections 
+                            WHERE organization_id = :org_id
+                        );
 
-        # 2. Delete user associations
-        db.execute(
-            text("DELETE FROM user_organizations WHERE organization_id = :org_id"),
-            {"org_id": org_id}
-        )
+                        -- Delete analytics configurations if table exists
+                        IF EXISTS (
+                            SELECT FROM information_schema.tables 
+                            WHERE table_schema = 'public' 
+                            AND table_name = 'analytics_configurations'
+                        ) THEN 
+                            DELETE FROM analytics_configurations 
+                            WHERE connection_id IN (
+                                SELECT id FROM data_source_connections 
+                                WHERE organization_id = :org_id
+                            );
+                        END IF;
 
-        # 3. Finally delete the organization
+                        -- Delete data source connections
+                        DELETE FROM data_source_connections 
+                        WHERE organization_id = :org_id;
+
+                        -- Delete articles
+                        IF EXISTS (
+                            SELECT FROM information_schema.tables 
+                            WHERE table_schema = 'public' 
+                            AND table_name = 'articles'
+                        ) THEN 
+                            DELETE FROM articles 
+                            WHERE organization_id = :org_id;
+                        END IF;
+
+                        -- Delete user associations
+                        DELETE FROM user_organizations 
+                        WHERE organization_id = :org_id;
+                    END $$;
+                """),
+                {"org_id": org_id}
+            )
+        except Exception as e:
+            print(f"Error deleting related data: {str(e)}")
+            # Continue with organization deletion even if some related deletions fail
+
+        # Finally delete the organization
         db.delete(org)
         db.commit()
         
